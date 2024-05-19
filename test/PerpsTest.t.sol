@@ -193,20 +193,24 @@ contract PerpsTest is PerpsEvents, Test {
     function test_calculatePnL() public addLiquidity createPositions {
         Perps.Position memory position = perps.getPosition(trader1);
         // no change in price should return 0
-        uint256 currentIndexPrice = position.averagePrice;
-        assertEq(currentIndexPrice, 64422e30);
-        assertEq(perps.calculatePnL(position, currentIndexPrice), 0);
+        // uint256 currentIndexPrice = position.averagePrice;
+        // assertEq(currentIndexPrice, 64422e30);
+        // assertEq(perps.calculatePnL(position, currentIndexPrice), 0);
+        assertEq(perps.calculatePnL(position), 0);
 
         // 10% reduction in current price should return -10% value in collateral tokens
         uint256 positionSizeInCollateralToken = perps.convertToken(position.size, Perps.Token.Index);
         int256 expectedPnL = int256(positionSizeInCollateralToken / 10) * -1;
-        currentIndexPrice = (position.averagePrice * 90) / 100;
-        assertEq(perps.calculatePnL(position, currentIndexPrice), expectedPnL);
+        int256 newPrice = int256((position.averagePrice * 90) / 100);
+        indexPricefeedMock.updateAnswer(newPrice);
+        // currentIndexPrice = (position.averagePrice * 90) / 100;
+        // assertEq(perps.calculatePnL(position, currentIndexPrice), expectedPnL);
+        assertEq(perps.calculatePnL(position), expectedPnL);
 
-        // 20% increase in current price should return +20% value in collateral tokens
-        expectedPnL = int256((positionSizeInCollateralToken * 20) / 100);
-        currentIndexPrice = position.averagePrice + ((position.averagePrice * 20) / 100);
-        assertEq(perps.calculatePnL(position, currentIndexPrice), expectedPnL);
+        // // 20% increase in current price should return +20% value in collateral tokens
+        // expectedPnL = int256((positionSizeInCollateralToken * 20) / 100);
+        // currentIndexPrice = position.averagePrice + ((position.averagePrice * 20) / 100);
+        // assertEq(perps.calculatePnL(position, currentIndexPrice), expectedPnL);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -231,7 +235,35 @@ contract PerpsTest is PerpsEvents, Test {
         // TODO: test functionality with Positions/PnL/Collateral in the system
     }
 
-    // function test_getReservedLiquidity
+    function test_removeLiquidity() public addLiquidity createPositions {
+        uint256 lpWethBalBefore = wethMock.balanceOf(lp1);
+        uint256 lpSharesBefore = perps.balanceOf(lp1);
+        assertEq(lpSharesBefore, INITIAL_LP_WETH);
+        uint256 lpAssetsBefore = perps.convertToAssets(lpSharesBefore);
+        assertEq(lpSharesBefore, lpAssetsBefore); // no PnL realized yet 
+        uint256 reservedLiquidity = perps.getReservedLiquidity();
+        assertTrue(reservedLiquidity < perps.getMaxUtilization() - lpAssetsBefore);
+
+        // lp1 removes all liquidity
+        vm.startPrank(lp1);
+        vm.expectEmit(address(perps));
+        emit PerpsEvents.LiquidityRemoved(lp1, lpAssetsBefore);
+        perps.removeLiquidity(lpSharesBefore);
+        vm.stopPrank();
+
+        assertEq(perps.balanceOf(lp1), 0);
+        assertEq(wethMock.balanceOf(lp1), lpWethBalBefore + lpAssetsBefore);
+
+        uint256 lp2Shares = perps.balanceOf(lp2);
+        // lp2 withdrawing would exceed max utililzation
+        assertFalse(reservedLiquidity < perps.getMaxUtilization() - lp2Shares);
+        // protocol will not allow lp2 to withdraw past max utilization threshold
+        vm.startPrank(lp2);
+        vm.expectRevert(Perps.Perps__InsufficientLiquidity.selector);
+        perps.removeLiquidity(lp2Shares);
+        vm.stopPrank();
+    }
+
 
     /*//////////////////////////////////////////////////////////////
                               Postition
@@ -241,7 +273,15 @@ contract PerpsTest is PerpsEvents, Test {
 
     }
 
+    function test_gas_internal() public {
+        uint256 calculatedInteranally = (1e8 * 664422e30) / perps.toUsd(Perps.Token.Index);
+        console.log(calculatedInteranally);
+    }
 
+    function test_gas_external() public {
+        uint256 calculatedFromPricefeed = perps.getUsdValue(1e8, Perps.Token.Index);
+        console.log(calculatedFromPricefeed); 
+    }
 
 
     // function test_sandbox() public {

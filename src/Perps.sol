@@ -11,7 +11,7 @@ import {SafeERC20} from "@openzeppelin/token/ERC20/utils/SafeERC20.sol";
 
 contract PerpsEvents {
     event LiquidityAdded(address indexed lp, uint256 amount);
-
+    event LiquidityRemoved(address indexed lp, uint256 amount);
     event PositionOpened(address indexed trader, uint256 size, uint256 collateral, bool isLong);
 }
 
@@ -158,11 +158,15 @@ contract Perps is PerpsEvents, ERC4626 {
         emit LiquidityAdded(msg.sender, amount);
     }
     
-    // function removeLiquidity(uint256 shares) external returns (uint256 amount) {}
+    function removeLiquidity(uint256 shares) external checkAvailableLiquidity returns (uint256 amount) {
+        amount = super.redeem(shares, msg.sender, msg.sender);
+        emit LiquidityRemoved(msg.sender, amount); 
+    }
 
     /*//////////////////////////////////////////////////////////////
                                Position
     //////////////////////////////////////////////////////////////*/
+
 
     function openPosition(
         uint256 size, 
@@ -205,10 +209,16 @@ contract Perps is PerpsEvents, ERC4626 {
                           Position Utilities
     //////////////////////////////////////////////////////////////*/
 
+    function calculateLeverage(Position calldata position, uint256 currentIndexPrice) public pure returns (uint256) {
+        // convert size to collateral token
+        // collateral + pnl
+        // size in collateral token / (collateral + pnl) 
+    }
+
     // returns PnL in collateral token
-    function calculatePnL(Position calldata position, uint256 currentIndexPrice) public view returns (int256 pnlInCollateralToken) {
+    function calculatePnL(Position calldata position) public view returns (int256 pnlInCollateralToken) {
         int256 pnlInUsd;
-        int256 currentValue = ((position.size * currentIndexPrice) / toUsd[Token.Index]).toInt256();
+        int256 currentValue = ((position.size * getPrice(Token.Index)) / toUsd[Token.Index]).toInt256();
         int256 valueWhenCreated = ((position.size * position.averagePrice) / toUsd[Token.Index]).toInt256();
         if (position.isLong) {
             pnlInUsd = currentValue - valueWhenCreated;
