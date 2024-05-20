@@ -226,7 +226,7 @@ contract PerpsTest is PerpsEvents, Test {
         newPrice = (initialPricefeedAnswer + ((initialPricefeedAnswer *20) / 100));
         indexPricefeedMock.updateAnswer(newPrice);
         expectedPnL = ((initialValueInCollateralToken * 20) / 100).toInt256();
-        assertApproxEqAbs(perps.getPositionPnL(position), expectedPnL, 1);  
+        assertApproxEqAbs(perps.getPositionPnL(position), expectedPnL, 1); // maxDelta 1 wei!
     }
 
     /*//////////////////////////////////////////////////////////////
