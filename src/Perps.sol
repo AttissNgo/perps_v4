@@ -174,7 +174,6 @@ contract Perps is PerpsEvents, ERC4626 {
         return getAmountInTokens(inputTokenAmountInUsd, outputToken, outputTokenPrice);
     }
 
-// thirty zeroes: 000000000000000000000000000000
     /*//////////////////////////////////////////////////////////////
                               Liquidity
     //////////////////////////////////////////////////////////////*/
@@ -184,52 +183,57 @@ contract Perps is PerpsEvents, ERC4626 {
         emit LiquidityAdded(msg.sender, amount);
     }
     
-    // function removeLiquidity(uint256 shares) external checkAvailableLiquidity returns (uint256 amount) {
-    //     amount = super.redeem(shares, msg.sender, msg.sender);
-    //     emit LiquidityRemoved(msg.sender, amount); 
-    // }
+    function removeLiquidity(uint256 shares) external checkAvailableLiquidity returns (uint256 amount) {
+        amount = super.redeem(shares, msg.sender, msg.sender);
+        emit LiquidityRemoved(msg.sender, amount); 
+    }
 
     /*//////////////////////////////////////////////////////////////
                                Position
     //////////////////////////////////////////////////////////////*/
 
+    /**
+     * 
+     * @param size in index token 
+     * @param collateral in collateral token
+     */
+    function openPosition(
+        uint256 size, 
+        uint256 collateral, 
+        bool isLong
+    ) 
+        external 
+        checkAvailableLiquidity    
+    {
+        // check inputs - no zero inputs
+        if (size <= 0) revert Perps__InsufficientSize();
+        if (collateral <= 0) revert Perps__InsufficientCollateral();
 
-    // function openPosition(
-    //     uint256 size, 
-    //     uint256 collateral, 
-    //     bool isLong
-    // ) 
-    //     external 
-    //     checkAvailableLiquidity    
-    // {
-    //     // check inputs - no zero inputs
-    //     if (size <= 0) revert Perps__InsufficientSize();
-    //     if (collateral <= 0) revert Perps__InsufficientCollateral();
+        // check if user has open position
+        Position memory position = positions[msg.sender];
+        if (position.collateral > 0) revert Perps__TraderHasOpenPosition();
 
-    //     // check if user has open position
-    //     Position memory position = positions[msg.sender];
-    //     if (position.collateral > 0) revert Perps__TraderHasOpenPosition();
+        // update open interest & collateral
+        uint256 indexPrice = getPrice(Token.Index);
+        _updateOpenInterest(size.toInt256(), isLong, indexPrice);
+        totalCollateral += collateral;
 
-    //     // update open interest & collateral
-    //     _updateOpenInterest(size.toInt256(), isLong);
-    //     totalCollateral += collateral;
+        // store data
+        position.size = size;
+        position.collateral = collateral;
+        position.averagePrice = indexPrice;
+        position.lastUpdated = block.timestamp;
+        position.isLong = isLong;
+        positions[msg.sender] = position;
 
-    //     // store data
-    //     position.size = size;
-    //     position.collateral = collateral;
-    //     position.averagePrice = getPrice(Token.Index);
-    //     position.lastUpdated = block.timestamp;
-    //     position.isLong = isLong;
-    //     positions[msg.sender] = position;
+        // TODO: check leverage
 
-    //     // TODO: check leverage
+        // transfer
+        collateralToken.safeTransferFrom(msg.sender, address(this), collateral);
 
-    //     // transfer
-    //     collateralToken.safeTransferFrom(msg.sender, address(this), collateral);
-
-    //     // event
-    //     emit PositionOpened(msg.sender, size, collateral, isLong);
-    // }
+        // event
+        emit PositionOpened(msg.sender, size, collateral, isLong);
+    }
 
     /*//////////////////////////////////////////////////////////////
                           Position Utilities
@@ -241,61 +245,71 @@ contract Perps is PerpsEvents, ERC4626 {
     //     // size in collateral token / (collateral + pnl) 
     // }
 
-    // // returns PnL in collateral token
-    // function calculatePnL(Position calldata position) public view returns (int256 pnlInCollateralToken) {
-    //     int256 pnlInUsd;
-    //     int256 currentValue = ((position.size * getPrice(Token.Index)) / toUsd[Token.Index]).toInt256();
-    //     int256 valueWhenCreated = ((position.size * position.averagePrice) / toUsd[Token.Index]).toInt256();
-    //     if (position.isLong) {
-    //         pnlInUsd = currentValue - valueWhenCreated;
-    //     } else {
-    //         pnlInUsd = valueWhenCreated - currentValue;
-    //     }
-    //     uint256 pnlInCollateralAbs = getAmountInTokens(pnlInUsd.abs(), Token.Collateral);
-    //     pnlInCollateralToken = (pnlInUsd < 0) ? (pnlInCollateralAbs.toInt256() * -1) : pnlInCollateralAbs.toInt256();
-    // }
+    /**
+     * @return PnL in collateral token
+     */
+    function getPositionPnL(Position calldata position) public view returns (int256) {
+        uint256 indexPrice = getPrice(Token.Index);
+        uint256 collateralPrice = getPrice(Token.Collateral);
+        int256 currentValueInCollateralToken = convertToken(position.size, Token.Index, indexPrice, collateralPrice).toInt256();
+        int256 initialValueInCollateralToken = convertToken(position.size, Token.Index, position.averagePrice, collateralPrice).toInt256();
+        if (position.isLong) {
+            return currentValueInCollateralToken - initialValueInCollateralToken;        
+        } else {
+            return initialValueInCollateralToken - currentValueInCollateralToken;
+        }
+    }
 
-    // // returns USD 1e30
-    // function calculateAveragePrice(
-    //     uint256 oldSize, 
-    //     uint256 oldAveragePrice, 
-    //     uint256 sizeIncrease
-    // ) 
-    //     public 
-    //     view 
-    //     returns (uint256 newAveragePrice) 
-    // {
-    //     newAveragePrice = (oldSize * oldAveragePrice + getPrice(Token.Index) * sizeIncrease) / 
-    //         (oldSize + sizeIncrease);
-    // }
+    /**
+     * 
+     * @param oldSize in index token
+     * @param oldAveragePrice in usd with 1e30 precision 
+     * @param currentIndexPrice in usd with 1e30 precision
+     * @param sizeIncrease in index token
+     * @return newAveragePrice in usd with 1e30 precision 
+     */
+    function calculateAveragePrice(
+        uint256 oldSize, 
+        uint256 oldAveragePrice, 
+        uint256 currentIndexPrice,
+        uint256 sizeIncrease
+    ) 
+        public 
+        pure        
+        returns (uint256 newAveragePrice) 
+    {
+        newAveragePrice = (oldSize * oldAveragePrice + currentIndexPrice * sizeIncrease) / 
+            (oldSize + sizeIncrease);
+    }
 
     /*//////////////////////////////////////////////////////////////
                               Accounting
     //////////////////////////////////////////////////////////////*/
 
-    // // if long, simply add or subtract size delta in index token
-    // // if short, convert to collateral token and handle
-    // function _updateOpenInterest(int256 sizeDelta, bool isLong) private {
-    //     if (isLong) {
-    //         openInterestLong = (openInterestLong.toInt256() + sizeDelta).toUint256();
-    //     } else {
-    //         uint256 sizeDeltaInCollateralToken = convertToken(sizeDelta.abs(), Token.Index);
-    //         if (sizeDelta > 0) {
-    //             openInterestShort += sizeDeltaInCollateralToken;
-    //         } else {
-    //             openInterestShort -= sizeDeltaInCollateralToken;
-    //         }
-    //     }
-    // }
+    // if long, simply add or subtract size delta in index token
+    // if short, convert to collateral token and handle
+    function _updateOpenInterest(int256 sizeDelta, bool isLong, uint256 currentIndexPrice) private {
+        if (isLong) {
+            openInterestLong = (openInterestLong.toInt256() + sizeDelta).toUint256();
+        } else {
+            uint256 collateralPrice = getPrice(Token.Collateral);
+            uint256 sizeDeltaInCollateralToken = convertToken(sizeDelta.abs(), Token.Index, currentIndexPrice, collateralPrice);
+            if (sizeDelta > 0) {
+                openInterestShort += sizeDeltaInCollateralToken;
+            } else {
+                openInterestShort -= sizeDeltaInCollateralToken;
+            }
+        }
+    }
 
-    // // returns borrowing fee owed in collateral token
-    // function calculateBorrowingFee(Position calldata position) public view returns (uint256) {
-    //     uint256 positionSizeInUsd = (position.size * position.averagePrice) / toUsd[Token.Index]; // 1e30
-    //     uint256 secondsPassedSinceLastUpdate = block.timestamp - position.lastUpdated;
-    //     uint256 borrowingFeeInUsd = (positionSizeInUsd * secondsPassedSinceLastUpdate * USD_PRECISION) /
-    //         BORROWING_FEE_RATE / USD_PRECISION;
-    //     return getAmountInTokens(borrowingFeeInUsd, Token.Collateral);
-    // }
+    // returns borrowing fee owed in collateral token
+    function calculateBorrowingFee(Position calldata position, uint256 collateralPrice) public view returns (uint256) {
+        uint256 positionSizeInUsd = (position.size * position.averagePrice) / toUsd[Token.Index]; // 1e30
+        uint256 secondsPassedSinceLastUpdate = block.timestamp - position.lastUpdated;
+        uint256 borrowingFeeInUsd = (positionSizeInUsd * secondsPassedSinceLastUpdate * USD_PRECISION) /
+            BORROWING_FEE_RATE / USD_PRECISION;
+        return getAmountInTokens(borrowingFeeInUsd, Token.Collateral, collateralPrice);
+    }
 
     /*//////////////////////////////////////////////////////////////
                            Public Utilities
@@ -312,11 +326,12 @@ contract Perps is PerpsEvents, ERC4626 {
     }
 
     // returns amount of liquidity (in Collateral token) currently reserved for open positions
-    // function getReservedLiquidity() public view returns (uint256) {
-    //     // TODO: get both token prices and pass to convertToken()
-    //     uint256 longOpenInterestInCollateralToken = convertToken(openInterestLong, Token.Index); 
-    //     return openInterestShort + longOpenInterestInCollateralToken;
-    // }
+    function getReservedLiquidity() public view returns (uint256) {
+        uint256 indexPrice = getPrice(Token.Index);
+        uint256 collateralPrice = getPrice(Token.Collateral);
+        uint256 longOpenInterestInCollateralToken = convertToken(openInterestLong, Token.Index, indexPrice, collateralPrice); 
+        return openInterestShort + longOpenInterestInCollateralToken;
+    }
 
     function getMaxUtilization() public view returns (uint256) {
         return (totalAssets() * MAX_UTILIZATION_PERCENTAGE) / 100;

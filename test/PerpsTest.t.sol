@@ -7,8 +7,11 @@ import {ERC20Mock} from "@openzeppelin/mocks/token/ERC20Mock.sol";
 import {MockAggregatorV3} from "test/mock/MockAggregatorV3.sol";
 import {Deployment} from "script/Deployment.s.sol";
 import {DeploymentConfig} from "script/DeploymentConfig.s.sol";
+import {SafeCast} from "@openzeppelin/utils/math/SafeCast.sol";
 
 contract PerpsTest is PerpsEvents, Test {
+    using SafeCast for int256;
+    using SafeCast for uint256;
 
     Perps public perps;
     // Deployment public deploymentScript;
@@ -69,20 +72,22 @@ contract PerpsTest is PerpsEvents, Test {
         _;
     }
 
-    // modifier createPositions() {
-    //     for (uint i; i < traders.length; ++i) {
-    //         uint256 leverage = (i + 1) * 2;
-    //         bool isLong = i % 2 == 0;
-    //         uint256 collateral = wethMock.balanceOf(traders[i]);
-    //         uint256 collateralInIndex = perps.convertToken(collateral, Perps.Token.Collateral);
-    //         uint256 size = collateralInIndex * leverage;
-    //         vm.startPrank(traders[i]);
-    //         wethMock.approve(address(perps), collateral);
-    //         perps.openPosition(size, collateral, isLong);
-    //         vm.stopPrank();
-    //     }
-    //     _;
-    // }
+    modifier createPositions() {
+        for (uint i; i < traders.length; ++i) {
+            uint256 leverage = (i + 1) * 2;
+            bool isLong = i % 2 == 0;
+            uint256 collateral = wethMock.balanceOf(traders[i]);
+            uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+            uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+            uint256 collateralInIndex = perps.convertToken(collateral, Perps.Token.Collateral, collateralPrice, indexPrice);
+            uint256 size = collateralInIndex * leverage;
+            vm.startPrank(traders[i]);
+            wethMock.approve(address(perps), collateral);
+            perps.openPosition(size, collateral, isLong);
+            vm.stopPrank();
+        }
+        _;
+    }
 
     /*//////////////////////////////////////////////////////////////
                     Pricefeed and conversion logic
@@ -132,89 +137,97 @@ contract PerpsTest is PerpsEvents, Test {
                     Public utilities & accounting
     //////////////////////////////////////////////////////////////*/
 
-    // function test_accountingGetters() public addLiquidity createPositions {
-    //     // total assets
-    //     uint256 contractWethBalance = wethMock.balanceOf(address(perps));
-    //     uint256 totalAssets = perps.totalAssets();
-    //     assertEq(totalAssets, contractWethBalance - perps.totalCollateral());
-    //     // max utilization
-    //     assertEq(perps.getMaxUtilization(), (totalAssets * 75) / 100);
-    //     // open interest
-    //     uint256 expectedOpenInterestShort;
-    //     for (uint i; i < traders.length; ++i) {
-    //         Perps.Position memory position = perps.getPosition(traders[i]);
-    //         if (!position.isLong) {
-    //             expectedOpenInterestShort += perps.convertToken(position.size, Perps.Token.Index);
-    //         }
-    //     }
-    //     assertEq(expectedOpenInterestShort, perps.openInterestShort());
-    //     assertEq(perps.getReservedLiquidity(), perps.openInterestShort() + perps.convertToken(perps.openInterestLong(), Perps.Token.Index));
-    //     // check available liquidity
-    //     uint256 remainingLiquidity = perps.getMaxUtilization() - perps.getReservedLiquidity();
-    //     uint256 remainingLiquidityInIndexToken = perps.convertToken(remainingLiquidity, Perps.Token.Collateral);
-    //     // console.log(remainingLiquidityInIndexToken);
-    //     address newTrader = makeAddr("newTrader");
-    //     wethMock.mint(newTrader, remainingLiquidity);
-    //     vm.startPrank(newTrader);
-    //     wethMock.approve(address(perps), wethMock.balanceOf(newTrader));
-    //     vm.expectRevert(Perps.Perps__InsufficientLiquidity.selector);
-    //     perps.openPosition(remainingLiquidityInIndexToken + 1, remainingLiquidityInIndexToken / 10, false);
-    //     vm.stopPrank();
-    // }
+    function test_accountingGetters() public addLiquidity createPositions {
+        // total assets
+        uint256 contractWethBalance = wethMock.balanceOf(address(perps));
+        uint256 totalAssets = perps.totalAssets();
+        assertEq(totalAssets, contractWethBalance - perps.totalCollateral());
+        // max utilization
+        assertEq(perps.getMaxUtilization(), (totalAssets * 75) / 100);
+        // open interest
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+        uint256 expectedOpenInterestShort;
+        for (uint i; i < traders.length; ++i) {
+            Perps.Position memory position = perps.getPosition(traders[i]);
+            if (!position.isLong) {
+                expectedOpenInterestShort += perps.convertToken(position.size, Perps.Token.Index, indexPrice, collateralPrice);
+            }
+        }
+        assertEq(expectedOpenInterestShort, perps.openInterestShort());
+        assertEq(
+            perps.getReservedLiquidity(), 
+            perps.openInterestShort() + perps.convertToken(perps.openInterestLong(), Perps.Token.Index, indexPrice, collateralPrice)
+        );
+        // check available liquidity
+        uint256 remainingLiquidity = perps.getMaxUtilization() - perps.getReservedLiquidity();
+        uint256 remainingLiquidityInIndexToken = perps.convertToken(remainingLiquidity, Perps.Token.Collateral, collateralPrice, indexPrice);
+        // console.log(remainingLiquidityInIndexToken);
+        address newTrader = makeAddr("newTrader");
+        wethMock.mint(newTrader, remainingLiquidity);
+        vm.startPrank(newTrader);
+        wethMock.approve(address(perps), wethMock.balanceOf(newTrader));
+        vm.expectRevert(Perps.Perps__InsufficientLiquidity.selector);
+        perps.openPosition(remainingLiquidityInIndexToken + 1, remainingLiquidityInIndexToken / 10, false);
+        vm.stopPrank();
+    }
 
-    // function test_calculateAveragePrice() public {
-    //     indexPricefeedMock.updateAnswer(50_000e8);
+    function test_calculateAveragePrice() public {
+        indexPricefeedMock.updateAnswer(50_000e8);
+        uint256 currentIndexPrice = perps.getPrice(Perps.Token.Index); 
+        uint256 oldSize = 1e8;
+        uint256 oldAvgPrice = perps.getPrice(Perps.Token.Index);
+        assertEq(oldAvgPrice, 50_000e30);
 
-    //     uint256 oldSize = 1e8;
-    //     uint256 oldAvgPrice = perps.getPrice(Perps.Token.Index);
-    //     assertEq(oldAvgPrice, 50_000e30);
+        indexPricefeedMock.updateAnswer(60_000e8);
+        currentIndexPrice = perps.getPrice(Perps.Token.Index); 
+        uint256 sizeIncrease = 1e8;
 
-    //     indexPricefeedMock.updateAnswer(60_000e8);
-    //     uint256 sizeIncrease = 1e8;
+        uint256 newAvgPrice = perps.calculateAveragePrice(oldSize, oldAvgPrice, currentIndexPrice, sizeIncrease);
+        assertEq(newAvgPrice, 55_000e30);
 
-    //     uint256 newAvgPrice = perps.calculateAveragePrice(oldSize, oldAvgPrice, sizeIncrease);
-    //     assertEq(newAvgPrice, 55_000e30);
+        indexPricefeedMock.updateAnswer(70_000e8);
+        currentIndexPrice = perps.getPrice(Perps.Token.Index); 
+        uint256 newOldSize = oldSize + sizeIncrease;
+        uint256 newSizeIncrease = 1e8;
 
-    //     indexPricefeedMock.updateAnswer(70_000e8);
-    //     uint256 newOldSize = oldSize + sizeIncrease;
-    //     uint256 newSizeIncrease = 1e8;
+        uint256 newerAvgPrice = perps.calculateAveragePrice(newOldSize, newAvgPrice, currentIndexPrice, newSizeIncrease);
+        assertEq(newerAvgPrice, 60_000e30);
+    }
 
-    //     uint256 newerAvgPrice = perps.calculateAveragePrice(newOldSize, newAvgPrice, newSizeIncrease);
-    //     assertEq(newerAvgPrice, 60_000e30);
-    // }
+    function test_calculateBorrowingFee() public addLiquidity createPositions {
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+        Perps.Position memory position = perps.getPosition(trader1);
+        assertEq(position.lastUpdated, block.timestamp);
+        vm.warp(365 days);
+        uint256 borrowingFee = perps.calculateBorrowingFee(position, collateralPrice);
+        uint256 sizeInCollateralToken = perps.convertToken(position.size, Perps.Token.Index, indexPrice, collateralPrice);
+        uint256 maxDelta = 1e12;
+        assertApproxEqAbs(borrowingFee, sizeInCollateralToken / 10, maxDelta);
+    }
 
-    // function test_calculateBorrowingFee() public addLiquidity createPositions {
-    //     Perps.Position memory position = perps.getPosition(trader1);
-    //     assertEq(position.lastUpdated, block.timestamp);
-    //     vm.warp(365 days);
-    //     uint256 borrowingFee = perps.calculateBorrowingFee(position);
-    //     uint256 sizeInCollateralToken = perps.convertToken(position.size, Perps.Token.Index);
-    //     uint256 maxDelta = 1e12;
-    //     assertApproxEqAbs(borrowingFee, sizeInCollateralToken / 10, maxDelta);
-    // }
+    function test_getPositionPnL() public addLiquidity createPositions {
+        Perps.Position memory position = perps.getPosition(trader1);
+        int256 initialPricefeedAnswer = indexPricefeedMock.latestAnswer();
+        // no change in price should return 0
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+        uint256 initialValueInCollateralToken = perps.convertToken(position.size, Perps.Token.Index, indexPrice, collateralPrice);
+        assertEq(perps.getPositionPnL(position), 0);
 
-    // function test_calculatePnL() public addLiquidity createPositions {
-    //     Perps.Position memory position = perps.getPosition(trader1);
-    //     // no change in price should return 0
-    //     // uint256 currentIndexPrice = position.averagePrice;
-    //     // assertEq(currentIndexPrice, 64422e30);
-    //     // assertEq(perps.calculatePnL(position, currentIndexPrice), 0);
-    //     assertEq(perps.calculatePnL(position), 0);
+        // 10% reduction in current price should return -10% value in collateral tokens
+        int256 newPrice = (initialPricefeedAnswer * 90) / 100;
+        indexPricefeedMock.updateAnswer(newPrice);
+        int256 expectedPnL = ((initialValueInCollateralToken * 10) / 100).toInt256() * -1;
+        assertEq(perps.getPositionPnL(position), expectedPnL);
 
-    //     // 10% reduction in current price should return -10% value in collateral tokens
-    //     uint256 positionSizeInCollateralToken = perps.convertToken(position.size, Perps.Token.Index);
-    //     int256 expectedPnL = int256(positionSizeInCollateralToken / 10) * -1;
-    //     int256 newPrice = int256((position.averagePrice * 90) / 100);
-    //     indexPricefeedMock.updateAnswer(newPrice);
-    //     // currentIndexPrice = (position.averagePrice * 90) / 100;
-    //     // assertEq(perps.calculatePnL(position, currentIndexPrice), expectedPnL);
-    //     assertEq(perps.calculatePnL(position), expectedPnL);
-
-    //     // // 20% increase in current price should return +20% value in collateral tokens
-    //     // expectedPnL = int256((positionSizeInCollateralToken * 20) / 100);
-    //     // currentIndexPrice = position.averagePrice + ((position.averagePrice * 20) / 100);
-    //     // assertEq(perps.calculatePnL(position, currentIndexPrice), expectedPnL);
-    // }
+        // 20% increase in current price should return +20% value in collateral tokens
+        newPrice = (initialPricefeedAnswer + ((initialPricefeedAnswer *20) / 100));
+        indexPricefeedMock.updateAnswer(newPrice);
+        expectedPnL = ((initialValueInCollateralToken * 20) / 100).toInt256();
+        assertApproxEqAbs(perps.getPositionPnL(position), expectedPnL, 1);  
+    }
 
     /*//////////////////////////////////////////////////////////////
                               Liquidity
@@ -238,34 +251,34 @@ contract PerpsTest is PerpsEvents, Test {
         // TODO: test functionality with Positions/PnL/Collateral in the system
     }
 
-    // function test_removeLiquidity() public addLiquidity createPositions {
-    //     uint256 lpWethBalBefore = wethMock.balanceOf(lp1);
-    //     uint256 lpSharesBefore = perps.balanceOf(lp1);
-    //     assertEq(lpSharesBefore, INITIAL_LP_WETH);
-    //     uint256 lpAssetsBefore = perps.convertToAssets(lpSharesBefore);
-    //     assertEq(lpSharesBefore, lpAssetsBefore); // no PnL realized yet 
-    //     uint256 reservedLiquidity = perps.getReservedLiquidity();
-    //     assertTrue(reservedLiquidity < perps.getMaxUtilization() - lpAssetsBefore);
+    function test_removeLiquidity() public addLiquidity createPositions {
+        uint256 lpWethBalBefore = wethMock.balanceOf(lp1);
+        uint256 lpSharesBefore = perps.balanceOf(lp1);
+        assertEq(lpSharesBefore, INITIAL_LP_WETH);
+        uint256 lpAssetsBefore = perps.convertToAssets(lpSharesBefore);
+        assertEq(lpSharesBefore, lpAssetsBefore); // no PnL realized yet 
+        uint256 reservedLiquidity = perps.getReservedLiquidity();
+        assertTrue(reservedLiquidity < perps.getMaxUtilization() - lpAssetsBefore);
 
-    //     // lp1 removes all liquidity
-    //     vm.startPrank(lp1);
-    //     vm.expectEmit(address(perps));
-    //     emit PerpsEvents.LiquidityRemoved(lp1, lpAssetsBefore);
-    //     perps.removeLiquidity(lpSharesBefore);
-    //     vm.stopPrank();
+        // lp1 removes all liquidity
+        vm.startPrank(lp1);
+        vm.expectEmit(address(perps));
+        emit PerpsEvents.LiquidityRemoved(lp1, lpAssetsBefore);
+        perps.removeLiquidity(lpSharesBefore);
+        vm.stopPrank();
 
-    //     assertEq(perps.balanceOf(lp1), 0);
-    //     assertEq(wethMock.balanceOf(lp1), lpWethBalBefore + lpAssetsBefore);
+        assertEq(perps.balanceOf(lp1), 0);
+        assertEq(wethMock.balanceOf(lp1), lpWethBalBefore + lpAssetsBefore);
 
-    //     uint256 lp2Shares = perps.balanceOf(lp2);
-    //     // lp2 withdrawing would exceed max utililzation
-    //     assertFalse(reservedLiquidity < perps.getMaxUtilization() - lp2Shares);
-    //     // protocol will not allow lp2 to withdraw past max utilization threshold
-    //     vm.startPrank(lp2);
-    //     vm.expectRevert(Perps.Perps__InsufficientLiquidity.selector);
-    //     perps.removeLiquidity(lp2Shares);
-    //     vm.stopPrank();
-    // }
+        uint256 lp2Shares = perps.balanceOf(lp2);
+        // lp2 withdrawing would exceed max utililzation
+        assertFalse(reservedLiquidity < perps.getMaxUtilization() - lp2Shares);
+        // protocol will not allow lp2 to withdraw past max utilization threshold
+        vm.startPrank(lp2);
+        vm.expectRevert(Perps.Perps__InsufficientLiquidity.selector);
+        perps.removeLiquidity(lp2Shares);
+        vm.stopPrank();
+    }
 
 
     /*//////////////////////////////////////////////////////////////
