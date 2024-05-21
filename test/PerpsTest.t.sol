@@ -147,28 +147,21 @@ contract PerpsTest is PerpsEvents, Test {
         // open interest
         uint256 indexPrice = perps.getPrice(Perps.Token.Index);
         uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
-        uint256 expectedOpenInterestShort;
+        uint256 expectedOpenInterest;
         for (uint i; i < traders.length; ++i) {
             Perps.Position memory position = perps.getPosition(traders[i]);
-            if (!position.isLong) {
-                expectedOpenInterestShort += perps.convertToken(position.size, Perps.Token.Index, indexPrice, collateralPrice);
-            }
+            expectedOpenInterest += perps.convertToken(position.size, Perps.Token.Index, indexPrice, collateralPrice);
         }
-        assertEq(expectedOpenInterestShort, perps.openInterestShort());
-        assertEq(
-            perps.getReservedLiquidity(), 
-            perps.openInterestShort() + perps.convertToken(perps.openInterestLong(), Perps.Token.Index, indexPrice, collateralPrice)
-        );
+        assertEq(perps.getReservedLiquidity(), expectedOpenInterest);
         // check available liquidity
         uint256 remainingLiquidity = perps.getMaxUtilization() - perps.getReservedLiquidity();
         uint256 remainingLiquidityInIndexToken = perps.convertToken(remainingLiquidity, Perps.Token.Collateral, collateralPrice, indexPrice);
-        // console.log(remainingLiquidityInIndexToken);
         address newTrader = makeAddr("newTrader");
         wethMock.mint(newTrader, remainingLiquidity);
         vm.startPrank(newTrader);
         wethMock.approve(address(perps), wethMock.balanceOf(newTrader));
         vm.expectRevert(Perps.Perps__InsufficientLiquidity.selector);
-        perps.openPosition(remainingLiquidityInIndexToken + 1, remainingLiquidityInIndexToken / 10, false);
+        perps.openPosition(remainingLiquidityInIndexToken + 1, remainingLiquidity / 10, false);
         vm.stopPrank();
     }
 
@@ -207,26 +200,50 @@ contract PerpsTest is PerpsEvents, Test {
         assertApproxEqAbs(borrowingFee, sizeInCollateralToken / 10, maxDelta);
     }
 
-    function test_getPositionPnL() public addLiquidity createPositions {
+    function test_calculatePositionPnL() public addLiquidity createPositions {
         Perps.Position memory position = perps.getPosition(trader1);
         int256 initialPricefeedAnswer = indexPricefeedMock.latestAnswer();
         // no change in price should return 0
         uint256 indexPrice = perps.getPrice(Perps.Token.Index);
         uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
         uint256 initialValueInCollateralToken = perps.convertToken(position.size, Perps.Token.Index, indexPrice, collateralPrice);
-        assertEq(perps.getPositionPnL(position), 0);
+        assertEq(perps.calculatePositionPnL(position, indexPrice, collateralPrice), 0);
 
         // 10% reduction in current price should return -10% value in collateral tokens
         int256 newPrice = (initialPricefeedAnswer * 90) / 100;
         indexPricefeedMock.updateAnswer(newPrice);
+        indexPrice = perps.getPrice(Perps.Token.Index);
         int256 expectedPnL = ((initialValueInCollateralToken * 10) / 100).toInt256() * -1;
-        assertEq(perps.getPositionPnL(position), expectedPnL);
+        assertApproxEqAbs(perps.calculatePositionPnL(position, indexPrice, collateralPrice), expectedPnL, 1); //maxDelta 1 wei!
 
         // 20% increase in current price should return +20% value in collateral tokens
         newPrice = (initialPricefeedAnswer + ((initialPricefeedAnswer *20) / 100));
         indexPricefeedMock.updateAnswer(newPrice);
+        indexPrice = perps.getPrice(Perps.Token.Index);
         expectedPnL = ((initialValueInCollateralToken * 20) / 100).toInt256();
-        assertApproxEqAbs(perps.getPositionPnL(position), expectedPnL, 1); // maxDelta 1 wei!
+        assertApproxEqAbs(perps.calculatePositionPnL(position, indexPrice, collateralPrice), expectedPnL, 1); // maxDelta 1 wei!
+    }
+
+    function test_calculateLeverage() public addLiquidity createPositions {
+        int256 initialPricefeedAnswer = indexPricefeedMock.latestAnswer();
+
+        Perps.Position memory position = perps.getPosition(trader4);
+        assertEq(position.isLong, false); // this position is a short, meaning it will lose leverage if price increases
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+        uint256 initialLeverage = perps.calculateLeverage(position, indexPrice, collateralPrice);
+        // console.log(initialLeverage);
+
+        // increase price by 10%
+        int256 newPrice = initialPricefeedAnswer + ((initialPricefeedAnswer * 10) / 100);
+        indexPricefeedMock.updateAnswer(newPrice);
+        indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 updatedLeverage = perps.calculateLeverage(position, indexPrice, collateralPrice);
+        // console.log(updatedLeverage);
+
+        assertGt(updatedLeverage, initialLeverage);
+
+        assertTrue(perps.isLiquidatable(position));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -285,60 +302,148 @@ contract PerpsTest is PerpsEvents, Test {
                               Postition
     //////////////////////////////////////////////////////////////*/
 
-    // function test_openPosition() public addLiquidity {
+    function test_openPosition() public addLiquidity {
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
 
-    // }
+        address newTrader = makeAddr("newTrader");
+        uint256 collateral = 1 ether;
+        bool isLong = true;
+        uint256 leverage = 10;
+        uint256 size = perps.convertToken((collateral * leverage), Perps.Token.Collateral, collateralPrice, indexPrice);
+        wethMock.mint(newTrader, collateral);
 
-    // function test_gas_internal() public {
-    //     uint256 calculatedInteranally = (1e8 * 664422e30) / perps.toUsd(Perps.Token.Index);
-    //     console.log(calculatedInteranally);
-    // }
+        uint256 contractWethBefore = wethMock.balanceOf(address(perps));
+        uint256 longOpenInterestBefore = perps.openInterestLong();
+        uint256 totalCollateralBefore = perps.totalCollateral();
 
-    // function test_gas_external() public {
-    //     uint256 calculatedFromPricefeed = perps.getUsdValue(1e8, Perps.Token.Index);
-    //     console.log(calculatedFromPricefeed); 
-    // }
+        vm.startPrank(newTrader);
+        wethMock.approve(address(perps), collateral);
+        vm.expectEmit(address(perps));
+        emit PerpsEvents.PositionOpened(newTrader, size, collateral, isLong);
+        perps.openPosition(size, collateral, isLong);
+        vm.stopPrank();
 
-    // function test_gas_two_calls() public returns (uint256, uint256) {
-    //     uint256 indexPrice = perps.getPrice(Perps.Token.Index);
-    //     uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
-    //     return (indexPrice, collateralPrice);
-    // }
+        Perps.Position memory position = perps.getPosition(newTrader);
+        assertEq(position.size, size);
+        assertEq(position.collateral, collateral);
+        assertEq(position.averagePrice, indexPrice);
+        assertEq(position.lastUpdated, block.timestamp);
+        assertEq(position.isLong, isLong);
 
-    // function test_gas_one_call() public returns (uint256, uint256) {
-    //     return (perps.getPrice(Perps.Token.Index), perps.getPrice(Perps.Token.Collateral));
-    // }
+        assertEq(wethMock.balanceOf(address(perps)), contractWethBefore + collateral);
+        uint256 sizeInCollateralToken = perps.convertToken(position.size, Perps.Token.Index, indexPrice, collateralPrice);
+        assertEq(perps.openInterestLong(), longOpenInterestBefore + sizeInCollateralToken);
+        assertEq(perps.totalCollateral(), totalCollateralBefore + collateral);
+    }
 
+    function test_openPosition_revert() public addLiquidity {
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+        address newTrader = makeAddr("newTrader");
+        
+        // exceeds max utilization
+        uint256 maxUtilization = perps.getMaxUtilization();        
+        uint256 exceedingSize = perps.convertToken(maxUtilization, Perps.Token.Collateral, collateralPrice, indexPrice) + 1;
+        wethMock.mint(newTrader, maxUtilization);
+        uint256 collateral = maxUtilization / 10;
+        bool isLong = true;
+        vm.startPrank(newTrader);
+        wethMock.approve(address(perps), collateral);
+        vm.expectRevert(Perps.Perps__InsufficientLiquidity.selector);
+        perps.openPosition(exceedingSize, collateral, isLong);
+        vm.stopPrank();
 
-    // function test_sandbox() public {
-    //     // 10000 usd should buy 0.2 BTC or 2e7
-    //     uint256 usd = 10_000e30;
-    //     uint256 btcPrice = 50_000e8;
-    //     uint256 btcDivisor = 1e14; // 1e30(usd precision) - 1e8(pricefeed answer) - 1e14(mult) = 1e8;
-    //     console.log(usd/btcPrice/btcDivisor);
+        // zero inputs
+        vm.prank(newTrader);
+        vm.expectRevert(Perps.Perps__InsufficientSize.selector);
+        perps.openPosition(0, 1, true);
+        vm.prank(newTrader);
+        vm.expectRevert(Perps.Perps__InsufficientCollateral.selector);
+        perps.openPosition(1,0,true);
 
-    //     // 100000 usd should buy 2 BTC or 2e8
-    //     usd = 100_000e30;
-    //     console.log(usd/btcPrice/btcDivisor);
+        // max leverage exceeded
+        uint256 size = 1e8;
+        collateral = (perps.convertToken(size, Perps.Token.Index, indexPrice, collateralPrice) / (perps.MAX_LEVERAGE() + 1));
+        vm.prank(newTrader);
+        vm.expectRevert(Perps.Perps__MaxLeverageExceeded.selector);
+        perps.openPosition(size, collateral, false);
 
-    //     usd = 1_000_000e30;
-    //     console.log(usd/btcPrice/btcDivisor);
+        // trader has open position
+        collateral = (perps.convertToken(size, Perps.Token.Index, indexPrice, collateralPrice) / 5);
+        vm.prank(newTrader);
+        perps.openPosition(size, collateral, false);
+        vm.prank(newTrader);
+        vm.expectRevert(Perps.Perps__TraderHasOpenPosition.selector);
+        perps.openPosition(size, collateral, true);
+    }
 
-    //     // 10000 usd should buy 5 ETH or 5e18
-    //     usd = 10_000e30;
-    //     uint256 ethPrice = 2000e8;
-    //     uint256 div = 30 - 8 - 18;
-    //     uint256 ethDivisor = 10**div;
-    //     console.log(usd/ethPrice/ethDivisor);
+    function test_increasePosition() public addLiquidity createPositions {
+        int256 initialAnswer = indexPricefeedMock.latestAnswer();
+        Perps.Position memory position = perps.getPosition(trader2);
+        assertEq(position.isLong, false);
 
-    //     // 100 usd should buy 0.05 ETH of 5e16
-    //     usd = 100 * 10**30;
-    //     console.log(usd/ethPrice/ethDivisor);
+        vm.warp(5 days);
+        
+        // price moves down by 5%
+        int256 newPrice = initialAnswer - ((initialAnswer * 5) / 100);
+        indexPricefeedMock.updateAnswer(newPrice);
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+        
+        // increase size by 20%
+        uint256 sizeIncrease = (position.size * 20) / 100;
+        uint256 sizeIncreaseInCollateralToken = perps.convertToken(sizeIncrease, Perps.Token.Index, indexPrice, collateralPrice);
+        // increase collateral by 10%
+        uint256 collateralIncrease = (position.collateral * 10) / 100;
+        wethMock.mint(trader2, collateralIncrease);
 
-    //     // 6 ETH (6e18) should be worth 12_000 usd (12_000e30)
-    //     uint256 value = 6e18 * ethPrice * ethDivisor; // (tokens * price) * divisor
-    //     assertEq(value, 12_000e30);
+        uint256 openInterestBefore = perps.openInterestShort();
+        uint256 totalCollateralBefore = perps.totalCollateral();
 
-    //     /// .... so must represent USD in higher decimals so we always divide by 1eX to get the proper token decimals
-    // }
+        uint256 borrowingFee = perps.calculateBorrowingFee(position, collateralPrice);
+        uint256 expectedAveragePrice = perps.calculateAveragePrice(position.size, position.averagePrice, indexPrice, sizeIncrease);
+
+        vm.startPrank(trader2);
+        wethMock.approve(address(perps), collateralIncrease);
+        vm.expectEmit(address(perps));
+        emit PerpsEvents.PositionIncreased(trader2, sizeIncrease, collateralIncrease);
+        perps.increasePosition(sizeIncrease, collateralIncrease);
+        vm.stopPrank();
+    
+        Perps.Position memory positionUpdated = perps.getPosition(trader2);
+        assertEq(positionUpdated.size, position.size + sizeIncrease);
+        assertEq(positionUpdated.collateral, position.collateral - borrowingFee + collateralIncrease);
+        assertEq(positionUpdated.averagePrice, expectedAveragePrice);
+        assertEq(positionUpdated.lastUpdated, block.timestamp);
+        assertEq(perps.openInterestShort(), openInterestBefore + sizeIncreaseInCollateralToken);
+        assertEq(perps.totalCollateral(), totalCollateralBefore + collateralIncrease - borrowingFee);
+    }
+
+    // function test_increasePosition_revert() public addLiquidity createPositions {}
+
+    function test_decreasePosition() public addLiquidity createPositions {
+        int256 initialAnswer = indexPricefeedMock.latestAnswer();
+        Perps.Position memory position = perps.getPosition(trader1);
+        assertEq(position.isLong, true);
+
+        // price moves up by 10%
+        int256 newPrice = initialAnswer + ((initialAnswer * 10) / 100);
+        indexPricefeedMock.updateAnswer(newPrice);
+        uint256 indexPrice = perps.getPrice(Perps.Token.Index);
+        uint256 collateralPrice = perps.getPrice(Perps.Token.Collateral);
+
+        int256 pnl = perps.calculatePositionPnL(position, indexPrice, collateralPrice);
+        console.logInt(pnl);
+
+        // decrease by half should realize HALF of pnl
+        uint256 traderWethBefore = wethMock.balanceOf(trader1);
+        vm.prank(trader1);
+        perps.decreasePosition(position.size / 2, 0);
+
+        console.logInt(pnl / 2);
+        console.log(wethMock.balanceOf(trader1));
+    }
+
 }
+
