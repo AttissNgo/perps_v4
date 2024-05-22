@@ -15,6 +15,7 @@ contract PerpsEvents {
     event PositionOpened(address indexed trader, uint256 size, uint256 collateral, bool isLong);
     event PositionIncreased(address indexed trader, uint256 sizeIncrease, uint256 collateralIncrease);
     event PositionDecreased(address indexed trader, uint256 sizeDecrease, uint256 collateralDecrease);
+    event PositionLiquidated(address indexed trader, address indexed liquidator, uint256 size);
 }
 
 contract Perps is PerpsEvents, ERC4626 {
@@ -53,6 +54,7 @@ contract Perps is PerpsEvents, ERC4626 {
     uint256 public constant MAX_UTILIZATION_PERCENTAGE = 75;
     uint256 public constant MAX_LEVERAGE = 15;
     uint256 public constant BORROWING_FEE_RATE = 315_360_000; // 10% total size per year
+    uint256 public constant LIQUIDATION_BONUS_PERCENTAGE = 10;
 
     /*//////////////////////////////////////////////////////////////
                            State Variables
@@ -319,16 +321,27 @@ contract Perps is PerpsEvents, ERC4626 {
         uint256 collateralPrice = getPrice(Token.Collateral);
         if (calculateLeverage(position, indexPrice, collateralPrice) <= MAX_LEVERAGE) revert Perps__PositionNotLiquidatable();
 
-        // negative pnl to Lps
-        int256 pnl = calculatePositionPnL(position, indexPrice, collateralPrice);
-        // borrowing fee to Lps
-        // liquidation fee to msg.sender
-        // remaining collateral to trader
+        uint256 liquidationBonus = (position.collateral * LIQUIDATION_BONUS_PERCENTAGE) / 100;
+        uint256 borrowingFee = calculateBorrowingFee(position, collateralPrice);
+        uint256 loss = calculatePositionPnL(position, indexPrice, collateralPrice).toUint256(); // can we safely assume this is negative???
+        uint256 remainingCollateral;
 
-        // state variables update - delete position!
+        // HANDLE PNL IF IT EXCEEDS COLLATERAL!!!
+        if (liquidationBonus + borrowingFee + loss >= position.collateral) {  
+            totalCollateral -= (position.collateral - liquidationBonus);
+        } else {
+            remainingCollateral = position.collateral - (liquidationBonus + borrowingFee + loss);
+            totalCollateral -= (borrowingFee + loss);
+        }
 
-        // event
+        _updateOpenInterest((position.size.toInt256() * -1), position.isLong, indexPrice, collateralPrice);
+        
+        emit PositionLiquidated(trader, msg.sender, position.size);
 
+        delete positions[trader];
+        
+        collateralToken.safeTransfer(msg.sender, liquidationBonus);
+        collateralToken.safeTransfer(trader, remainingCollateral);
     }
 
     /*//////////////////////////////////////////////////////////////
